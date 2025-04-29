@@ -109,8 +109,6 @@ async def play_sound(sound_list, display_message):
 
 async def process_event(event):
     # end function immediately if the mixer is already playing a sound
-    if pygame.mixer.music.get_busy():
-        return
     
     global lcd
     if event.type == ecodes.EV_KEY:
@@ -121,11 +119,11 @@ async def process_event(event):
         elif event.code == aBtn:
             asyncio.create_task(play_sound(sents, "SOUND: SENT"))
         elif event.code == bBtn:
-            asyncio.create_task(play_sound(screams, "SOUND: SCREAM"))
+            asyncio.create_task(play_sound(["/home/pi/Desktop/r2d2-new/audio-files/mix/ANNOYED.mp3"], "SOUND: ANNOYED"))
         elif event.code == l1Btn:
             asyncio.create_task(play_sound(["/home/pi/Desktop/r2d2-new/audio-files/mix/CANTINA.mp3"], "SOUND: CANTINA"))
         elif event.code == r1Btn:
-            asyncio.create_task(play_sound(["/home/pi/Desktop/r2d2-new/audio-files/mix/ANNOYED.mp3"], "SOUND: SH.CIRC")) #change to short circuit sound once found
+            asyncio.create_task(play_sound(screams, "SOUND: SCREAM"))
         else:
             logging.info(f"Unsupported Button: {event}")
             lcd.putstr("Unsupported")
@@ -161,44 +159,76 @@ async def process_joystick(event, motors, saber):
         saber.drive(1, int(global_head_value))
 
 
-async def main_loop(gamepad, motors, saber):
-    try:
-        async for event in gamepad.async_read_loop():
-            logging.info(f"Received event: {event}")
-            if event.type == ecodes.EV_KEY:
-                asyncio.create_task(process_event(event))
-            elif event.type == ecodes.EV_ABS:
-                asyncio.create_task(process_joystick(event, motors, saber))
-    except Exception as ex:
-        logger.exception(f"Exception in main loop: {ex}")
-    finally:
-        # ALWAYS stop motors cleanly no matter what
-        lcd.clear()
-        lcd.putstr("R2D2 offline!")
-        if saber:
-            try:
-                saber.drive(1, 0)  # STOP head motor
-            except Exception as e:
-                logger.error(f"Failed stopping saber: {e}")
-        if motors:
-            try:
-                motors.SetSpeed1(128)  # neutral
-                motors.SetSpeed2Turn(128)  # neutral
-            except Exception as e:
-                logger.error(f"Failed stopping motors: {e}")
+async def main_loop(gamepad, gamepad_path, motors, saber):
+    while True:
+        try:
+            async for event in gamepad.async_read_loop():
+                logging.info(f"Received event: {event}")
+                if event.type == ecodes.EV_KEY:
+                    asyncio.create_task(process_event(event))
+                elif event.type == ecodes.EV_ABS:
+                    asyncio.create_task(process_joystick(event, motors, saber))
+        except (OSError, IOError) as ex:
+            # Gamepad likely disconnected
+            logger.warning(f"Gamepad disconnected: {ex}")
+            lcd.clear()
+            lcd.putstr("CTRL LOST")
+
+            # Stop motors and saber safely
+            if saber:
+                try:
+                    saber.drive(1, 0)
+                except Exception as e:
+                    logger.error(f"Failed stopping saber: {e}")
+            if motors:
+                try:
+                    motors.SetSpeed1(128)
+                    motors.SetSpeed2Turn(128)
+                except Exception as e:
+                    logger.error(f"Failed stopping motors: {e}")
+
+            # Try to reconnect
+            gamepad = None
+            while gamepad is None:
+                try:
+                    lcd.clear()
+                    lcd.putstr("WAITING FOR CTRL")
+                    gamepad = InputDevice(gamepad_path)
+                    lcd.clear()
+                    lcd.putstr("CTRL CONNECTED")
+                except Exception:
+                    await asyncio.sleep(2)
+        except Exception as ex:
+            logger.exception(f"Unexpected exception in main loop: {ex}")
+            break  # Break only on unexpected non-recoverable error
+        finally:
+            lcd.clear()
+            lcd.putstr("R2D2 offline!")
+            if saber:
+                try:
+                    saber.drive(1, 0)
+                except Exception as e:
+                    logger.error(f"Failed stopping saber: {e}")
+            if motors:
+                try:
+                    motors.SetSpeed1(128)
+                    motors.SetSpeed2Turn(128)
+                except Exception as e:
+                    logger.error(f"Failed stopping motors: {e}")
+
+
 
 async def main():
-    gamepad = None
-    while gamepad is None:
+    gamepad_path = '/dev/input/event6'
+
+    while True:
         try:
-            clearLCDLine()
+            lcd.clear()
             lcd.putstr("WAITING FOR CTRL")
-            gamepad = InputDevice('/dev/input/event6')
-            if gamepad:
-                clearLCDLine()
-                lcd.putstr("CTRL CONNECTED")
-            else:
-                await asyncio.sleep(2)
+            gamepad = InputDevice(gamepad_path)
+            lcd.clear()
+            lcd.putstr("CTRL CONNECTED")
+            break
         except Exception:
             logger.info("Waiting for controller...")
             await asyncio.sleep(2)
@@ -227,7 +257,8 @@ async def main():
     except Exception as e:
         logger.error(f"Error connecting to Sabertooth: {e}")
 
-    await main_loop(gamepad, motors, saber)
+    await main_loop(gamepad, gamepad_path, motors, saber)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
