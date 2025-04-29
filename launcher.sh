@@ -14,6 +14,6 @@
 #sleep 10000
 
 cd /home/pi/Desktop/r2d2-2023-embedded-controller/new-r2d2-code/2023R2
-python3 2304-wrktrm.py 
+python3 R2D2_main.py
 
 sleep 10000
