@@ -189,11 +189,10 @@ async def main_loop(gamepad, motors, saber):
 
 async def main():
     gamepad = None
-    clearLCDLine()
-    lcd.putstr("WAITING FOR CTRL")
-    
     while gamepad is None:
         try:
+            clearLCDLine()
+            lcd.putstr("WAITING FOR CTRL")
             gamepad = InputDevice('/dev/input/event6')
             if gamepad:
                 clearLCDLine()
