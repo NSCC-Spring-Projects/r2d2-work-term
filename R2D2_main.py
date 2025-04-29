@@ -20,6 +20,7 @@ import sys
 import time
 import logging
 from evdev import InputDevice, ecodes
+from evdev.ecodes import ABS_HAT0X, ABS_HAT0Y
 
 
 # Constants for LCD and global variables
@@ -76,6 +77,12 @@ rvaxis = 5
 # Click mode for l2 and r2 trig, which needs to be ignored.
 clickL2Trig = 312
 clickR2Trig = 313
+
+# mapping for D-Pad
+padLeft = -1
+padRight = 1
+padUp = -1
+padDown = 1
 
 # Function for clearing the second line of the display.
 def clearLCDLine():
@@ -147,6 +154,17 @@ async def process_joystick(event, motors, saber):
             global_head_value = translate(event.value, 0, 255, -40, 40)
         else:
             global_head_value = 0
+    # mapping for values on the D-Pad
+    if event.code == ABS_HAT0X:
+        if event.value == padLeft:
+            asyncio.create_task(play_sound(hums, "DPAD: LEFT"))
+        elif event.value == padRight:
+            asyncio.create_task(play_sound(screams, "DPAD: RIGHT"))
+    elif event.code == ABS_HAT0Y:
+        if event.value == padUp:
+            asyncio.create_task(play_sound(sents, "DPAD: UP"))
+        elif event.value == padDown:
+            asyncio.create_task(play_sound(procs, "DPAD: DOWN"))
 
     # Now use the latest values to drive
     leftMotorValue = max(1, min(254, global_forward_value + global_turn_value))
@@ -200,8 +218,6 @@ async def main_loop(gamepad, gamepad_path, motors, saber):
                     await asyncio.sleep(2)
         except Exception as ex:
             logger.exception(f"Unexpected exception in main loop: {ex}")
-            break  # Break only on unexpected non-recoverable error
-        finally:
             lcd.clear()
             lcd.putstr("R2D2 offline!")
             if saber:
@@ -215,6 +231,7 @@ async def main_loop(gamepad, gamepad_path, motors, saber):
                     motors.SetSpeed2Turn(128)
                 except Exception as e:
                     logger.error(f"Failed stopping motors: {e}")
+            break  # Break only on unexpected non-recoverable error
 
 
 
