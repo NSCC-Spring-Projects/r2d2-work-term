@@ -114,9 +114,16 @@ async def play_sound(sound_list, display_message):
     while pygame.mixer.music.get_busy():
         await asyncio.sleep(0.1)  # Yield control while waiting for the sound to finish
 
+async def send_to_arduino(message, arduino_head):
+    try:
+        arduino_head.write((message))
+        clearLCDLine()
+        lcd.putstr("SENT ARDUINO")
+        await asyncio.sleep(0)  # Yield control
+    except Exception as e:
+        logger.error(f"Error sending to Arduino: {e}")
+
 async def process_event(event):
-    # end function immediately if the mixer is already playing a sound
-    
     global lcd
     if event.type == ecodes.EV_KEY:
         if event.code == yBtn:
@@ -135,7 +142,7 @@ async def process_event(event):
             logging.info(f"Unsupported Button: {event}")
             lcd.putstr("Unsupported")
 
-async def process_joystick(event, motors, saber):
+async def process_joystick(event, motors, saber, arduino_head):
     global global_forward_value, global_turn_value, global_head_value
     deadzone = 10
 
@@ -157,7 +164,7 @@ async def process_joystick(event, motors, saber):
     # mapping for values on the D-Pad
     if event.code == ABS_HAT0X:
         if event.value == padLeft:
-            asyncio.create_task(play_sound(hums, "DPAD: LEFT"))
+            asyncio.create_task(send_to_arduino(bytes([1]), arduino_head))
         elif event.value == padRight:
             asyncio.create_task(play_sound(screams, "DPAD: RIGHT"))
     elif event.code == ABS_HAT0Y:
@@ -177,7 +184,7 @@ async def process_joystick(event, motors, saber):
         saber.drive(1, int(global_head_value))
 
 
-async def main_loop(gamepad, gamepad_path, motors, saber):
+async def main_loop(gamepad, gamepad_path, motors, saber, arduino_head):
     while True:
         try:
             async for event in gamepad.async_read_loop():
@@ -185,7 +192,7 @@ async def main_loop(gamepad, gamepad_path, motors, saber):
                 if event.type == ecodes.EV_KEY:
                     asyncio.create_task(process_event(event))
                 elif event.type == ecodes.EV_ABS:
-                    asyncio.create_task(process_joystick(event, motors, saber))
+                    asyncio.create_task(process_joystick(event, motors, saber, arduino_head))
         except (OSError, IOError) as ex:
             # Gamepad likely disconnected
             logger.warning(f"Gamepad disconnected: {ex}")
@@ -254,7 +261,10 @@ async def main():
 
     motors = None
     saber = None
-
+    # Set the serial port and baud rate based on your configuration
+    serial_port = '/dev/ttyACM0'
+    baud_rate = 9600
+    
     try:
         motors = MD49.MotorBoardMD49(uartBus='/dev/ttyS0')
         motors.DisableTimeout()
@@ -274,7 +284,15 @@ async def main():
     except Exception as e:
         logger.error(f"Error connecting to Sabertooth: {e}")
 
-    await main_loop(gamepad, gamepad_path, motors, saber)
+    # Initialize the serial connection
+    try:
+        arduino_head = serial.Serial(serial_port, baud_rate, timeout=10)
+        await asyncio.sleep(2)
+    except Exception as e:
+        logging.error(f" Failed to open serial to Arduino: {e}")
+        arduino_head = None
+
+    await main_loop(gamepad, gamepad_path, motors, saber, arduino_head)
 
 
 if __name__ == "__main__":
