@@ -1,292 +1,227 @@
+'''
+Refactored MD49 driver for Python 3
+By: Sloan Corey
+
+This driver is designed to control the MD49 Dual 24V Motor Controller.
+It provides methods for motor speed control, encoder readings,
+voltage and current monitoring, and regulator/timeout control.
+It also includes a method to reset the controller to safe default settings.
+'''
+
+
 import serial
-from time import sleep
-from    struct  import pack, unpack
-
-class MotorBoardMD49 :
-
-    # ============================================================================
-    # ===( Constants )============================================================
-    # ============================================================================
-
-    # READ COMMANDS,
-    GET_SPEED_1         = b'\x21'
-    GET_SPEED_2         = b'\x22'
-    GET_ENCODER_1       = b'\x23'
-    GET_ENCODER_2       = b'\x24'
-    GET_ENCODERS        = b'\x25'
-    GET_VOLTS           = b'\x26'
-    GET_CURRENT_1       = b'\x27'
-    GET_CURRENT_2       = b'\x28'
-    GET_VERSION         = b'\x29'
-    GET_ACCELERATION    = b'\x2A'
-    GET_MODE            = b'\x2B'
-    GET_VI              = b'\x2C'
-    GET_ERROR           = b'\x2D'
-    
-    # WRITE COMMANDS,
-    SET_SPEED_1         = b'\x31'
-    SET_SPEED_2_TURN    = b'\x32'
-    SET_ACCELERATION    = b'\x33'
-    SET_MODE            = b'\x34'
-    RESET_ENCODERS      = b'\x35'
-    DISABLE_REGULATOR   = b'\x36'
-    ENABLE_REGULATOR    = b'\x37'
-    DISABLE_TIMEOUT     = b'\x38'
-    ENABLE_TIMEOUT      = b'\x39'
-
-    # ============================================================================
-    # ===( Constructor )==========================================================
-    # ============================================================================
-
-    def __init__(self, uartBus) :
-        self._uart = serial.Serial( 
-                           port     = uartBus,
-                           baudrate = 38400, #make sure to short jumper pins for higher speed
-                           bytesize = serial.EIGHTBITS,
-                           parity   = serial.PARITY_NONE,
-                           stopbits = serial.STOPBITS_ONE,
-                           )
-        self._mode = 0
-
-
-    # ============================================================================
-    # ===( Utils )================================================================
-    # ============================================================================
-
-    def _txCmd(self, cmdByte, valueByte=None) :
-        if cmdByte is not None and len(cmdByte) == 1 and \
-           ( valueByte is None or len(valueByte) == 1 ) :
-            if valueByte is not None :
-                buf = b'\x00' + cmdByte + valueByte
-            else :
-                buf = b'\x00' + cmdByte
-            for i in range(100) :
-                res = self._uart.write(buf)
-                if res is not None and res == len(buf) :
-                    return True
-                sleep(10/1000) #10 ms
-        return False
-
-    # ----------------------------------------------------------------------------
-
-    def _rxRet(self, retSize) :
-        ret = b''
-        ok  = False
-        for i in range(100) :
-            buf = self._uart.read(size=1) #might not work?
-            if buf is not None :
-                ret += buf
-                if len(ret) == retSize :
-                    ok = True
-                    break
-            print(ret)
-            sleep(10/1000)
-        return ret if ok else None
-
-    # # ----------------------------------------------------------------------------
-
-    def bitIsUpInByte(self, bitPos, byte) :
-        if bitPos >= 1 and bitPos <= 8 :
-            return ( byte[0] & pack('B', 0 | 1 << 8-bitPos)[0] ) > 0
-        return byte
-
-    # # ============================================================================
-    # # ===( Functions )============================================================
-    # # ============================================================================
-
-    # def GetSpeed1(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_SPEED_1) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             fmt = 'B' if self._mode == 0 or self._mode == 2 else 'b'
-    #             return unpack(fmt, ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetSpeed2(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_SPEED_2) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             fmt = 'B' if self._mode == 0 or self._mode == 2 else 'b'
-    #             return unpack(fmt, ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetEncoder1(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_ENCODER_1) :
-    #         ret = self._rxRet(4)
-    #         if ret is not None :
-    #             return unpack('>i', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetEncoder2(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_ENCODER_2) :
-    #         ret = self._rxRet(4)
-    #         if ret is not None :
-    #             return unpack('>i', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetEncoders(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_ENCODERS) :
-    #         ret = self._rxRet(8)
-    #         if ret is not None :
-    #             return unpack('>ii', ret)
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetVolts(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_VOLTS) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             return unpack('B', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetCurrent1(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_CURRENT_1) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             return unpack('B', ret)[0] / 10
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetCurrent2(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_CURRENT_2) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             return unpack('B', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    def GetVersion(self) :
-         if self._txCmd(MotorBoardMD49.GET_VERSION) :
-             ret = self._rxRet(1)
-             if ret is not None :
-                 return unpack('B', ret)[0]
-         return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetAcceleration(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_ACCELERATION) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             return unpack('B', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetMode(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_MODE) :
-    #         ret = self._rxRet(1)
-    #         if ret is not None :
-    #             return unpack('B', ret)[0]
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetVI(self) :
-    #     if self._txCmd(MotorBoardMD49.GET_VI) :
-    #         ret = self._rxRet(3)
-    #         if ret is not None :
-    #             return unpack('BBB', ret)
-    #     return None
-
-    # # ----------------------------------------------------------------------------
-
-    # def GetError(self) :
-    #   if self._txCmd(MotorBoardMD49.GET_ERROR) :
-    #        ret = self._rxRet(1)
-    #        if ret is not None :
-    #            return {
-    #                "MOTOR_1_TRIP"  : self.bitIsUpInByte(6, ret),
-    #                "MOTOR_2_TRIP"  : self.bitIsUpInByte(5, ret),
-    #                "MOTOR_1_SHORT" : self.bitIsUpInByte(4, ret),
-    #                "MOTOR_2_SHORT" : self.bitIsUpInByte(3, ret),
-    #                "OVER_30V"      : self.bitIsUpInByte(2, ret),
-    #                "UNDER_16V"     : self.bitIsUpInByte(1, ret)
-    #            }
-    #    return None
-
-    # ----------------------------------------------------------------------------
-
-    def SetSpeed1(self, value) :
-        if self._mode == 0 or self._mode == 2 :
-            fmt = 'B'
-            if value < 0 or value > 255 :
-                return False
-        else :
-            fmt = 'b'
-            if value < -128 or value > 127 :
-                return False
-        #print(f"fmt is {fmt} ....")
-        #print(f"value is {value} ....")
-        return self._txCmd(MotorBoardMD49.SET_SPEED_1, pack(fmt, value))
-
-    # ----------------------------------------------------------------------------
-
-    def SetSpeed2Turn(self, value) :
-        if self._mode == 0 or self._mode == 2 :
-            fmt = 'B'
-            if value < 0 or value > 255 :
-                return False
-        else :
-            fmt = 'b'
-            if value < -128 or value > 127 :
-                return False
-        return self._txCmd(MotorBoardMD49.SET_SPEED_2_TURN, pack(fmt, value))
-
-    # ----------------------------------------------------------------------------
-
-    def SetAcceleration(self, value) :
-        if value >= 1 and value <= 10 :
-            return self._txCmd(MotorBoardMD49.SET_ACCELERATION, pack('B', value))
-        return False
-
-    # ----------------------------------------------------------------------------
-
-    def SetMode(self, mode) :
-        if mode >= 0 and mode <= 3 :
-            if self._txCmd(MotorBoardMD49.SET_MODE, pack('B', mode)) :
-                self._mode = mode
-                return True
-        return False
-
-    # ----------------------------------------------------------------------------
-
-    def ResetEncoders(self) :
-        return self._txCmd(MotorBoardMD49.RESET_ENCODERS)
-
-    # ----------------------------------------------------------------------------
-
-    def DisableRegulator(self) :
-        return self._txCmd(MotorBoardMD49.DISABLE_REGULATOR)
-
-    # ----------------------------------------------------------------------------
-
-    def EnableRegulator(self) :
-        return self._txCmd(MotorBoardMD49.ENABLE_REGULATOR)
-
-    # ----------------------------------------------------------------------------
-
-    def DisableTimeout(self) :
-        return self._txCmd(MotorBoardMD49.DISABLE_TIMEOUT)
-
-    # ----------------------------------------------------------------------------
-
-    def EnableTimeout(self) :
-        return self._txCmd(MotorBoardMD49.ENABLE_TIMEOUT)
-
-    # ============================================================================
-    # ============================================================================
-    # ============================================================================
+from struct import unpack
+ 
+class MotorBoardMD49:
+    """
+    Python driver for the MD49 Dual 24V Motor Controller.
+ 
+    Supports motor speed control, encoder readings, voltage, current monitoring,
+    regulator/timeout control, and safe default initialization.
+    """
+ 
+    SYNC_BYTE = 0x00  # Sync byte required at the start of every command
+ 
+    # Command bytes from MD49 documentation
+    CMD_GET_SPEED_1 = 0x21
+    CMD_GET_SPEED_2 = 0x22
+    CMD_GET_ENCODER_1 = 0x23
+    CMD_GET_ENCODER_2 = 0x24
+    CMD_GET_VOLTS = 0x26
+    CMD_GET_CURRENT_1 = 0x27
+    CMD_GET_CURRENT_2 = 0x28
+    CMD_GET_ERROR = 0x2D
+    CMD_SET_SPEED_1 = 0x31
+    CMD_SET_SPEED_2 = 0x32
+    CMD_SET_ACCELERATION = 0x33
+    CMD_SET_MODE = 0x34
+    CMD_RESET_ENCODERS = 0x35
+    CMD_DISABLE_REGULATOR = 0x36
+    CMD_ENABLE_REGULATOR = 0x37
+    CMD_DISABLE_TIMEOUT = 0x38
+    CMD_ENABLE_TIMEOUT = 0x39
+ 
+    def __init__(self, port, baudrate=38400, timeout=1):
+        """
+        Initialize serial connection to MD49 motor controller.
+ 
+        :param port: Serial port (e.g., '/dev/ttyUSB0' or 'COM3')
+        :param baudrate: Communication baud rate (default 38400)
+        :param timeout: Serial read timeout in seconds
+        """
+        self.ser = serial.Serial(port, baudrate, timeout=timeout)
+ 
+    def _write(self, command, *data):
+        """
+        Send a command to the MD49.
+ 
+        :param command: Command byte (e.g., 0x21 for GET SPEED 1)
+        :param data: Optional data bytes (e.g., speed value)
+        """
+        packet = bytes([self.SYNC_BYTE, command] + list(data))
+        self.ser.write(packet)
+ 
+    def _read_bytes(self, count):
+        """
+        Read raw bytes from the MD49.
+ 
+        :param count: Number of bytes to read
+        :return: Byte string of length 'count'
+        """
+        return self.ser.read(count)
+ 
+    def _read_byte(self):
+        """
+        Read a single byte from the MD49.
+ 
+        :return: Byte as integer or None if timeout
+        """
+        data = self._read_bytes(1)
+        return data[0] if data else None
+ 
+    def _read_long(self):
+        """
+        Read a 4-byte signed integer from the MD49 (big-endian).
+ 
+        :return: 32-bit signed integer
+        """
+        data = self._read_bytes(4)
+        if len(data) != 4:
+            raise IOError("Failed to read 4 bytes from MD49")
+        return unpack('>i', data)[0]
+ 
+    # -------------------- GET Commands --------------------
+    def get_speed(self, motor):
+        """
+        Get the requested speed of a motor.
+ 
+        :param motor: 1 or 2
+        :return: Speed value (0-255 or -128 to 127 depending on mode)
+        """
+        cmd = self.CMD_GET_SPEED_1 if motor == 1 else self.CMD_GET_SPEED_2
+        self._write(cmd)
+        return self._read_byte()
+ 
+    def get_encoder(self, motor):
+        """
+        Get encoder count of a motor.
+ 
+        :param motor: 1 or 2
+        :return: Signed 32-bit encoder count
+        """
+        cmd = self.CMD_GET_ENCODER_1 if motor == 1 else self.CMD_GET_ENCODER_2
+        self._write(cmd)
+        return self._read_long()
+ 
+    def get_volts(self):
+        """
+        Get battery voltage.
+ 
+        :return: Voltage value in volts (e.g., 24)
+        """
+        self._write(self.CMD_GET_VOLTS)
+        return self._read_byte()
+ 
+    def get_current(self, motor):
+        """
+        Get current draw of a motor.
+ 
+        :param motor: 1 or 2
+        :return: Current in tenths of an ampere (e.g., 25 = 2.5A)
+        """
+        cmd = self.CMD_GET_CURRENT_1 if motor == 1 else self.CMD_GET_CURRENT_2
+        self._write(cmd)
+        return self._read_byte()
+ 
+    def get_error(self):
+        """
+        Get error status byte.
+ 
+        :return: Error byte (bits indicate specific faults)
+        """
+        self._write(self.CMD_GET_ERROR)
+        return self._read_byte()
+ 
+    # -------------------- SET Commands --------------------
+    def set_speed(self, motor, speed):
+        """
+        Set the speed of a motor.
+ 
+        :param motor: 1 or 2
+        :param speed: Speed value (0-255 or -128 to 127 depending on mode)
+        """
+        cmd = self.CMD_SET_SPEED_1 if motor == 1 else self.CMD_SET_SPEED_2
+        speed = max(0, min(255, speed))  # Clamp to 0-255 range
+        self._write(cmd, speed)
+ 
+    def set_acceleration(self, value):
+        """
+        Set the acceleration rate.
+ 
+        :param value: Acceleration (1-10)
+        """
+        value = max(1, min(10, value))  # Clamp to 1-10 range
+        self._write(self.CMD_SET_ACCELERATION, value)
+ 
+    def set_mode(self, mode):
+        """
+        Set the MD49 operation mode.
+ 
+        :param mode: 0, 1, 2, or 3
+        """
+        if mode not in (0, 1, 2, 3):
+            raise ValueError("Mode must be 0, 1, 2, or 3")
+        self._write(self.CMD_SET_MODE, mode)
+ 
+    def reset_encoders(self):
+        """
+        Reset both encoder counts to zero.
+        """
+        self._write(self.CMD_RESET_ENCODERS)
+ 
+    # -------------------- Regulator Control --------------------
+    def disable_regulator(self):
+        """
+        Disable automatic speed regulation using encoder feedback.
+        """
+        self._write(self.CMD_DISABLE_REGULATOR)
+ 
+    def enable_regulator(self):
+        """
+        Enable automatic speed regulation using encoder feedback.
+        """
+        self._write(self.CMD_ENABLE_REGULATOR)
+ 
+    # -------------------- Timeout Control --------------------
+    def disable_timeout(self):
+        """
+        Disable the 2-second serial communication timeout safety feature.
+        """
+        self._write(self.CMD_DISABLE_TIMEOUT)
+ 
+    def enable_timeout(self):
+        """
+        Enable the 2-second serial communication timeout safety feature.
+        """
+        self._write(self.CMD_ENABLE_TIMEOUT)
+ 
+    # -------------------- Safe Defaults --------------------
+    def reset_to_defaults(self):
+        """
+        Reset the MD49 to safe default settings:
+        - Mode 0 (unsigned speed control)
+        - Acceleration 5 (default value)
+        - Enable regulator
+        - Enable timeout safety
+        """
+        self.set_mode(0)
+        self.set_acceleration(5)
+        self.enable_regulator()
+        self.reset_encoders()
+        self.enable_timeout()
+ 
+    def close(self):
+        """
+        Close the serial connection to the MD49.
+        """
+        self.ser.close()

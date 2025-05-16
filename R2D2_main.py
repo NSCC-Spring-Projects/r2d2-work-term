@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 
 """
+R2D2 Main Control Script - May 2025
+Partial overhaul and refactor of the original code written by previous teams.
+Current iteration and updates written by Jay Harvie & Sloan Corey
+
+Resources:
 CronTab:https://www.makeuseof.com/how-to-run-a-raspberry-pi-program-script-at-startup/
 Make HC06 work: https://dev.to/ivanmoreno/how-to-connect-raspberry-pi-with-hc-05-bluetooth-module-arduino-programm-3h7a
 """
+
+#TODO: Add more comments to the code
+#TODO: Clean up imports
+#TODO: Look into consolidating error handling
+#TODO: Clean up constants and global vars.
+#TODO: Look into using a config file for constants
+#TODO: Look into displaying diagnostic information on the LCD
 
 import asyncio
 import pygame
@@ -35,12 +47,18 @@ global_forward_value = 128
 global_turn_value = 0
 global_head_value = 0
 
-# Configure logging
+last_left_speed = 128
+last_right_speed = 128
+last_motor_update_time = 0
+last_refresh_time = 0
+update_interval = 0.05  # 50 ms normal update rate
+refresh_interval = 1.0  # 1.0 s to refresh MD49 to prevent timeout
+drift_trim = 0.10  # 10% correction to left motor
+
+
+
 logging.basicConfig(filename='/home/pi/Desktop/r2d2-2025.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Create a logger
 logger = logging.getLogger(__name__)
-
 logger.info("Starting with the application logs")
 
 # List of selected sounds
@@ -53,6 +71,8 @@ sents = ["/home/pi/Desktop/r2d2-new/audio-files/sent/SENT2.mp3", "/home/pi/Deskt
 procs = ["/home/pi/Desktop/r2d2-new/audio-files/proc/PROC2.mp3", "/home/pi/Desktop/r2d2-new/audio-files/proc/PROC3.mp3",
          "/home/pi/Desktop/r2d2-new/audio-files/proc/PROC5.mp3", "/home/pi/Desktop/r2d2-new/audio-files/proc/PROC13.mp3", "/home/pi/Desktop/r2d2-new/audio-files/proc/PROC15.mp3"]
 starwars = ["/home/pi/Desktop/r2d2-new/audio-files/starwars/ALARM9.mp3", "/home/pi/Desktop/r2d2-new/audio-files/starwars/MISC14.mp3"]
+
+#TODO: Clean up button mappings
 
 # Button mapping for controller.
 aBtn = 304
@@ -84,6 +104,10 @@ padRight = 1
 padUp = -1
 padDown = 1
 
+# Global drive values (updated by joystick handler)
+desired_forward = 0.0
+desired_turn = 0.0
+
 # Function for clearing the second line of the display.
 def clearLCDLine():
     i = 0
@@ -92,18 +116,6 @@ def clearLCDLine():
         lcd.putchar(" ")
         i += 1
     lcd.move_to(0, 1)
-
-# function to translate analog axis inputs to motor speeds
-def translate(value, leftMin, leftMax, rightMin, rightMax):
-    # Figure out how 'wide' each range is
-    leftSpan = leftMax - leftMin
-    rightSpan = rightMax - rightMin
-
-    # Convert the left range into a 0-1 range (float)
-    valueScaled = float(value - leftMin) / float(leftSpan)
-
-    # Convert the 0-1 range into a value in the right range.
-    return rightMin + (valueScaled * rightSpan)
 
 async def play_sound(sound_list, display_message):
     global lcd
@@ -114,6 +126,8 @@ async def play_sound(sound_list, display_message):
     while pygame.mixer.music.get_busy():
         await asyncio.sleep(0.1)  # Yield control while waiting for the sound to finish
 
+
+# TODO: integrate the R2 heads arduino & test the code
 async def send_to_arduino(message, arduino_head):
     try:
         arduino_head.write((message))
@@ -122,6 +136,26 @@ async def send_to_arduino(message, arduino_head):
         await asyncio.sleep(0)  # Yield control
     except Exception as e:
         logger.error(f"Error sending to Arduino: {e}")
+
+async def saber_drive_loop(saber, get_head_value_fn, interval=0.05):
+    """
+    Continuously sends Saber drive commands at a safe refresh rate.
+    Ensures head movement stays responsive.
+
+    :param saber: Sabertooth controller instance
+    :param get_head_value_fn: Callable that returns latest head axis value (-1.0 to 1.0)
+    :param interval: Update interval in seconds (default 50ms)
+    """
+    logger.info("Starting Saber drive loop")
+
+    while True:
+        try:
+            head_value = get_head_value_fn()
+            saber.drive(1, int(head_value * 40))
+        except Exception as e:
+            logger.error(f"Saber drive failed: {e}")
+
+        await asyncio.sleep(interval)
 
 async def process_event(event):
     global lcd
@@ -142,59 +176,132 @@ async def process_event(event):
             logging.info(f"Unsupported Button: {event}")
             lcd.putstr("Unsupported")
 
-async def process_joystick(event, motors, saber, arduino_head):
-    global global_forward_value, global_turn_value, global_head_value
-    deadzone = 10
+# TODO: Adjust response curve for better low-end control
+def apply_response_curve(input_value, curve_factor=3.0):  # Adjusted for finer low-end control
+    sign = 1 if input_value >= 0 else -1
+    return sign * (abs(input_value) ** curve_factor)
 
-    if event.code == lhaxis:
-        if abs(event.value - 127) > deadzone:
-            global_turn_value = translate(event.value, 0, 255, -60, 60)
-        else:
-            global_turn_value = 0
+# TODO: remove magic numbers and create constants for the joystick values & deadzone
+async def process_joystick(event):
+    global desired_forward, desired_turn, desired_head_value
+
+    deadzone = 15 / 128.0  # increased deadzone
+
     if event.code == lvaxis:
-        if abs(event.value - 127) > deadzone:
-            global_forward_value = translate(event.value, 0, 255, 66, 190)
-        else:
-            global_forward_value = 128
-    if event.code == rhaxis:
-        if abs(event.value - 127) > deadzone:
-            global_head_value = translate(event.value, 0, 255, -40, 40)
-        else:
-            global_head_value = 0
-    # mapping for values on the D-Pad
+        normalized_value = (event.value - 127) / 128.0
+        desired_forward = apply_response_curve(normalized_value, curve_factor=2.0) if abs(normalized_value) >= deadzone else 0.0
+
+    elif event.code == lhaxis:
+        normalized_value = (event.value - 127) / 128.0
+        desired_turn = apply_response_curve(normalized_value, curve_factor=2.0) if abs(normalized_value) >= deadzone else 0.0
+
+    elif event.code == rhaxis:
+        normalized_value = (event.value - 127) / 128.0
+        desired_head_value = normalized_value if abs(normalized_value) >= deadzone else 0.0
+
+    # DPAD actions, queue Arduino messages safely
     if event.code == ABS_HAT0X:
         if event.value == padLeft:
-            asyncio.create_task(send_to_arduino(bytes([1]), arduino_head))
+            await arduino_queue.put(bytes([1]))
         elif event.value == padRight:
             asyncio.create_task(play_sound(screams, "DPAD: RIGHT"))
+
     elif event.code == ABS_HAT0Y:
         if event.value == padUp:
             asyncio.create_task(play_sound(sents, "DPAD: UP"))
         elif event.value == padDown:
             asyncio.create_task(play_sound(procs, "DPAD: DOWN"))
 
-    # Now use the latest values to drive
-    leftMotorValue = max(1, min(254, global_forward_value + global_turn_value))
-    rightMotorValue = max(1, min(254, global_forward_value - global_turn_value))
-
-    if motors:
-        motors.SetSpeed2Turn(int(rightMotorValue))
-        motors.SetSpeed1(int(leftMotorValue))
-    if saber:
-        saber.drive(1, int(global_head_value))
-
-
-async def main_loop(gamepad, gamepad_path, motors, saber, arduino_head):
+#TODO: Either do more with the MD49 polling or remove it
+async def poll_md49_telemetry(motors, interval=0.5):
+    logger.info("Starting MD49 telemetry polling loop")
     while True:
         try:
-            async for event in gamepad.async_read_loop():
-                logging.info(f"Received event: {event}")
-                if event.type == ecodes.EV_KEY:
-                    asyncio.create_task(process_event(event))
-                elif event.type == ecodes.EV_ABS:
-                    asyncio.create_task(process_joystick(event, motors, saber, arduino_head))
+            volts = motors.get_volts()
+            encoder1 = motors.get_encoder(1)
+            encoder2 = motors.get_encoder(2)
+            logger.info(f"MD49 Telemetry: Volts={volts}, Encoder1={encoder1}, Encoder2={encoder2}")
+        except Exception as e:
+            logger.error(f"Telemetry polling failed: {e}")
+        await asyncio.sleep(interval)
+
+#TODO: Write proper commenting / function description
+async def md49_drive_loop(motors, interval=0.05):
+    global desired_forward, desired_turn
+    global last_left_speed, last_right_speed
+
+    logger.info("Starting MD49 drive loop")
+
+    while True:
+        left_motor = desired_forward + desired_turn
+        right_motor = desired_forward - desired_turn
+
+        # Clamp
+        left_motor = max(-1.0, min(1.0, left_motor))
+        right_motor = max(-1.0, min(1.0, right_motor))
+
+        # Apply drift correction only during straight motion
+        if abs(desired_forward) > 0.01 and abs(desired_turn) <= 0.01:
+            correction = drift_trim * abs(desired_forward)
+            left_motor -= correction
+            right_motor += correction
+
+        mapped_left = int(128 + left_motor * 127)
+        mapped_right = int(128 + right_motor * 127)
+
+        if abs(desired_forward) <= 0.01 and abs(desired_turn) <= 0.01:
+            if last_left_speed != 128 or last_right_speed != 128:
+                motors.set_speed(1, 128)
+                motors.set_speed(2, 128)
+                last_left_speed = 128
+                last_right_speed = 128
+        else:
+            if abs(mapped_left - last_left_speed) > 1:
+                motors.set_speed(1, mapped_left)
+                last_left_speed = mapped_left
+
+            if abs(mapped_right - last_right_speed) > 1:
+                motors.set_speed(2, mapped_right)
+                last_right_speed = mapped_right
+
+        await asyncio.sleep(interval)
+
+#TODO: Write proper commenting / function description
+async def saber_drive_loop(saber, interval=0.05):
+    global desired_head_value
+    logger.info("Starting Saber drive loop")
+
+    while True:
+        try:
+            saber.drive(1, int(desired_head_value * 40))
+        except Exception as e:
+            logger.error(f"Saber drive error: {e}")
+        await asyncio.sleep(interval)
+
+#TODO: Write proper commenting / function description
+async def arduino_send_loop(arduino_head):
+    logger.info("Starting Arduino send loop")
+    while True:
+        message = await arduino_queue.get()
+        try:
+            arduino_head.write(message)
+            clearLCDLine()
+            lcd.putstr("SENT ARDUINO")
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logger.error(f"Arduino send failed: {e}")
+
+#TODO: Write proper commenting / function description
+#TODO: Look into why saber is undefined here (suspect not in scope)
+async def main_loop(gamepad):
+    async for event in gamepad.async_read_loop():
+        try:
+            if event.type == ecodes.EV_KEY:
+                asyncio.create_task(process_event(event))
+            elif event.type == ecodes.EV_ABS:
+                asyncio.create_task(process_joystick(event))
+
         except (OSError, IOError) as ex:
-            # Gamepad likely disconnected
             logger.warning(f"Gamepad disconnected: {ex}")
             lcd.clear()
             lcd.putstr("CTRL LOST")
@@ -207,8 +314,8 @@ async def main_loop(gamepad, gamepad_path, motors, saber, arduino_head):
                     logger.error(f"Failed stopping saber: {e}")
             if motors:
                 try:
-                    motors.SetSpeed1(128)
-                    motors.SetSpeed2Turn(128)
+                    motors.set_speed(1, 128)
+                    motors.set_speed(2, 128)
                 except Exception as e:
                     logger.error(f"Failed stopping motors: {e}")
 
@@ -234,14 +341,13 @@ async def main_loop(gamepad, gamepad_path, motors, saber, arduino_head):
                     logger.error(f"Failed stopping saber: {e}")
             if motors:
                 try:
-                    motors.SetSpeed1(128)
-                    motors.SetSpeed2Turn(128)
+                    motors.set_speed(1, 128)
+                    motors.set_speed(2, 128)
                 except Exception as e:
                     logger.error(f"Failed stopping motors: {e}")
-            break  # Break only on unexpected non-recoverable error
+            break
 
-
-
+# Write additional commenting
 async def main():
     gamepad_path = '/dev/input/event6'
 
@@ -254,22 +360,21 @@ async def main():
             lcd.putstr("CTRL CONNECTED")
             break
         except Exception:
-            logger.info("Waiting for controller...")
             await asyncio.sleep(2)
 
     pygame.mixer.init()
 
     motors = None
     saber = None
-    # Set the serial port and baud rate based on your configuration
     serial_port = '/dev/ttyACM0'
     baud_rate = 9600
-    
+
     try:
-        motors = MD49.MotorBoardMD49(uartBus='/dev/ttyS0')
-        motors.DisableTimeout()
-        motors.SetSpeed1(128)
-        motors.SetSpeed2Turn(128)
+        motors = MD49.MotorBoardMD49(port='/dev/ttyS0')
+        motors.reset_to_defaults()
+        motors.set_speed(1, 128)
+        motors.set_speed(2, 128)
+        logging.info(f"md49 motor controller connected: {motors}")
     except Exception as e:
         logger.error(f"Error connecting to MD49: {e}")
 
@@ -289,11 +394,17 @@ async def main():
         arduino_head = serial.Serial(serial_port, baud_rate, timeout=10)
         await asyncio.sleep(2)
     except Exception as e:
-        logging.error(f" Failed to open serial to Arduino: {e}")
+        logging.error(f"Failed to open serial to Arduino: {e}")
         arduino_head = None
 
-    await main_loop(gamepad, gamepad_path, motors, saber, arduino_head)
+    if motors:
+        asyncio.create_task(md49_drive_loop(motors))
+    if saber:
+        asyncio.create_task(saber_drive_loop(saber))
+    if arduino_head:
+        asyncio.create_task(arduino_send_loop(arduino_head))
 
+    await main_loop(gamepad)
 
 if __name__ == "__main__":
     asyncio.run(main())
