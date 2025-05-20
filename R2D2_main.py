@@ -16,6 +16,9 @@ Make HC06 work: https://dev.to/ivanmoreno/how-to-connect-raspberry-pi-with-hc-05
 #TODO: Clean up constants and global vars.
 #TODO: Look into using a config file for constants
 #TODO: Look into displaying diagnostic information on the LCD
+#TODO: Diagnose/Fix full forward motor cutout
+#TODO: Implement USB/UART code to connect to the Arduino
+#TODO: Look into retreiving battery voltage and displaying it on the LCD
 
 import asyncio
 import pygame
@@ -107,6 +110,9 @@ padDown = 1
 # Global drive values (updated by joystick handler)
 desired_forward = 0.0
 desired_turn = 0.0
+desired_head_value = 0.0
+
+arduino_queue = asyncio.Queue()
 
 # Function for clearing the second line of the display.
 def clearLCDLine():
@@ -125,7 +131,6 @@ async def play_sound(sound_list, display_message):
     pygame.mixer.music.play()
     while pygame.mixer.music.get_busy():
         await asyncio.sleep(0.1)  # Yield control while waiting for the sound to finish
-
 
 # TODO: integrate the R2 heads arduino & test the code
 async def send_to_arduino(message, arduino_head):
@@ -176,6 +181,13 @@ async def process_event(event):
             logging.info(f"Unsupported Button: {event}")
             lcd.putstr("Unsupported")
 
+# Apply a stronger correction at lower speeds, tapering off at higher speeds
+def calculate_drift_correction(forward_value):
+    # forward_value: -1.0 to 1.0
+    # Use an inverted curve to increase correction at low speeds
+    correction_strength = 0.2 * (1 - abs(forward_value)) + 0.25  # between 0.05 and 0.25
+    return correction_strength if forward_value >= 0 else -correction_strength
+
 # TODO: Adjust response curve for better low-end control
 def apply_response_curve(input_value, curve_factor=3.0):  # Adjusted for finer low-end control
     sign = 1 if input_value >= 0 else -1
@@ -202,8 +214,10 @@ async def process_joystick(event):
     # DPAD actions, queue Arduino messages safely
     if event.code == ABS_HAT0X:
         if event.value == padLeft:
-            await arduino_queue.put(bytes([1]))
+            await arduino_queue.put(bytes([2]))
+            await arduino_queue.put(bytes([3]))
         elif event.value == padRight:
+            await arduino_queue.put(bytes([1]))
             asyncio.create_task(play_sound(screams, "DPAD: RIGHT"))
 
     elif event.code == ABS_HAT0Y:
@@ -242,7 +256,7 @@ async def md49_drive_loop(motors, interval=0.05):
 
         # Apply drift correction only during straight motion
         if abs(desired_forward) > 0.01 and abs(desired_turn) <= 0.01:
-            correction = drift_trim * abs(desired_forward)
+            correction = calculate_drift_correction(desired_forward)
             left_motor -= correction
             right_motor += correction
 
@@ -286,10 +300,35 @@ async def arduino_send_loop(arduino_head):
         try:
             arduino_head.write(message)
             clearLCDLine()
-            lcd.putstr("SENT ARDUINO")
+            lcd.putstr(f"SENT ARD@: {message}")
             await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"Arduino send failed: {e}")
+
+async def arduino_read_loop(arduino_head):
+    """
+    Asynchronously reads lines from the Arduino serial connection
+    and logs each response with a timestamp.
+    """
+    logger.info("Starting Arduino read loop")
+
+    # Non-blocking read workaround using threads
+    loop = asyncio.get_event_loop()
+    
+    def read_line_blocking():
+        try:
+            line = arduino_head.readline().decode("utf-8", errors="ignore").strip()
+            return line
+        except Exception as e:
+            logger.error(f"Serial read failed: {e}")
+            return None
+
+    while True:
+        line = await loop.run_in_executor(None, read_line_blocking)
+        if line:
+            logger.info(f"Arduino: {line}")
+        await asyncio.sleep(0.01)  # Prevent tight loop
+
 
 #TODO: Write proper commenting / function description
 #TODO: Look into why saber is undefined here (suspect not in scope)
@@ -366,7 +405,8 @@ async def main():
 
     motors = None
     saber = None
-    serial_port = '/dev/ttyACM0'
+    serial_port = '/dev/ttyUSB0'
+    # arduino_serial_port = '/dev/ttyUSB0'
     baud_rate = 9600
 
     try:
@@ -403,6 +443,7 @@ async def main():
         asyncio.create_task(saber_drive_loop(saber))
     if arduino_head:
         asyncio.create_task(arduino_send_loop(arduino_head))
+        asyncio.create_task(arduino_read_loop(arduino_head))
 
     await main_loop(gamepad)
 
