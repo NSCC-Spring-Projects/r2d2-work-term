@@ -17,7 +17,6 @@ Make HC06 work: https://dev.to/ivanmoreno/how-to-connect-raspberry-pi-with-hc-05
 #TODO: Look into using a config file for constants
 #TODO: Look into displaying diagnostic information on the LCD
 #TODO: Diagnose/Fix full forward motor cutout
-#TODO: Implement USB/UART code to connect to the Arduino
 #TODO: Look into retreiving battery voltage and displaying it on the LCD
 
 import asyncio
@@ -45,10 +44,15 @@ I2C_NUM_COLS = 16
 
 lcd = I2cLcd(1, I2C_ADDR, I2C_NUM_ROWS, I2C_NUM_COLS)
 
+motors = None
+saber = None
+
 # Global joystick state
 global_forward_value = 128
 global_turn_value = 0
 global_head_value = 0
+
+INVERT_FORWARD_AXIS = False
 
 last_left_speed = 128
 last_right_speed = 128
@@ -56,7 +60,6 @@ last_motor_update_time = 0
 last_refresh_time = 0
 update_interval = 0.05  # 50 ms normal update rate
 refresh_interval = 1.0  # 1.0 s to refresh MD49 to prevent timeout
-drift_trim = 0.10  # 10% correction to left motor
 
 
 
@@ -183,13 +186,12 @@ async def process_event(event):
 
 # Apply a stronger correction at lower speeds, tapering off at higher speeds
 def calculate_drift_correction(forward_value):
-    # forward_value: -1.0 to 1.0
-    # Use an inverted curve to increase correction at low speeds
-    correction_strength = 0.2 * (1 - abs(forward_value)) + 0.25  # between 0.05 and 0.25
-    return correction_strength if forward_value >= 0 else -correction_strength
+    base_strength = 0.28  # Base strength of the correction
+    scaled_strength = base_strength * abs(forward_value)
+    return scaled_strength if forward_value >= 0 else -scaled_strength
 
 # TODO: Adjust response curve for better low-end control
-def apply_response_curve(input_value, curve_factor=3.0):  # Adjusted for finer low-end control
+def apply_response_curve(input_value, curve_factor=1.0):  # Adjusted for finer low-end control
     sign = 1 if input_value >= 0 else -1
     return sign * (abs(input_value) ** curve_factor)
 
@@ -197,15 +199,18 @@ def apply_response_curve(input_value, curve_factor=3.0):  # Adjusted for finer l
 async def process_joystick(event):
     global desired_forward, desired_turn, desired_head_value
 
-    deadzone = 15 / 128.0  # increased deadzone
+    deadzone = 5 / 128.0  # increased deadzone
 
     if event.code == lvaxis:
         normalized_value = (event.value - 127) / 128.0
-        desired_forward = apply_response_curve(normalized_value, curve_factor=2.0) if abs(normalized_value) >= deadzone else 0.0
+        if INVERT_FORWARD_AXIS:
+            normalized_value *= -1
+        value = apply_response_curve(normalized_value, curve_factor=1.0)
+        desired_forward = value if abs(normalized_value) >= deadzone else 0.0
 
     elif event.code == lhaxis:
         normalized_value = (event.value - 127) / 128.0
-        desired_turn = apply_response_curve(normalized_value, curve_factor=2.0) if abs(normalized_value) >= deadzone else 0.0
+        desired_turn = apply_response_curve(normalized_value, curve_factor=1.0) if abs(normalized_value) >= deadzone else 0.0
 
     elif event.code == rhaxis:
         normalized_value = (event.value - 127) / 128.0
@@ -247,21 +252,30 @@ async def md49_drive_loop(motors, interval=0.05):
     logger.info("Starting MD49 drive loop")
 
     while True:
+        # Combine forward and turn
         left_motor = desired_forward + desired_turn
         right_motor = desired_forward - desired_turn
 
-        # Clamp
+        # Clamp before drift correction
         left_motor = max(-1.0, min(1.0, left_motor))
         right_motor = max(-1.0, min(1.0, right_motor))
 
-        # Apply drift correction only during straight motion
+        # Apply drift correction only if going straight
         if abs(desired_forward) > 0.01 and abs(desired_turn) <= 0.01:
             correction = calculate_drift_correction(desired_forward)
-            left_motor -= correction
-            right_motor += correction
+            left_motor += correction
+            right_motor -= correction
 
-        mapped_left = int(128 + left_motor * 127)
-        mapped_right = int(128 + right_motor * 127)
+        # Clamp again after correction
+        left_motor = max(-1.0, min(1.0, left_motor))
+        right_motor = max(-1.0, min(1.0, right_motor))
+
+        # Apply response curve
+        left_motor = apply_response_curve(left_motor, curve_factor=1.0)
+        right_motor = apply_response_curve(right_motor, curve_factor=1.0)
+
+        mapped_left = int(128 + (left_motor) * 127)
+        mapped_right = int(128 + (right_motor) * 127)
 
         if abs(desired_forward) <= 0.01 and abs(desired_turn) <= 0.01:
             if last_left_speed != 128 or last_right_speed != 128:
@@ -287,7 +301,7 @@ async def saber_drive_loop(saber, interval=0.05):
 
     while True:
         try:
-            saber.drive(1, int(desired_head_value * 40))
+            saber.drive(1, int(desired_head_value * 80))
         except Exception as e:
             logger.error(f"Saber drive error: {e}")
         await asyncio.sleep(interval)
@@ -328,7 +342,6 @@ async def arduino_read_loop(arduino_head):
         if line:
             logger.info(f"Arduino: {line}")
         await asyncio.sleep(0.01)  # Prevent tight loop
-
 
 #TODO: Write proper commenting / function description
 #TODO: Look into why saber is undefined here (suspect not in scope)
@@ -403,8 +416,6 @@ async def main():
 
     pygame.mixer.init()
 
-    motors = None
-    saber = None
     serial_port = '/dev/ttyUSB0'
     # arduino_serial_port = '/dev/ttyUSB0'
     baud_rate = 9600
@@ -412,8 +423,29 @@ async def main():
     try:
         motors = MD49.MotorBoardMD49(port='/dev/ttyS0')
         motors.reset_to_defaults()
-        motors.set_speed(1, 128)
+        motors.set_speed(1, 128)  
         motors.set_speed(2, 128)
+
+        # ### REMOVE ME - TEMP TESTING ###
+        # lcd.clear()
+        # lcd.putstr("Testing L Motor")
+        # motors.set_speed(1, 200)  # Left motor forward
+        # motors.set_speed(2, 128)  # Right motor neutral
+        # time.sleep(3)
+
+        # motors.set_speed(1, 128)  # Left motor neutral
+        # motors.set_speed(2, 200)  # Right motor forward
+        # lcd.clear()
+        # lcd.putstr("Testing R Motor")
+        # time.sleep(3)
+
+        # motors.set_speed(1, 128)  # Stop both motors
+        # motors.set_speed(2, 128)
+        # lcd.clear()
+        # lcd.putstr("Test Complete")
+        # ### REMOVE ME - TEMP TESTING ###
+
+
         logging.info(f"md49 motor controller connected: {motors}")
     except Exception as e:
         logger.error(f"Error connecting to MD49: {e}")
