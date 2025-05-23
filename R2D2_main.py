@@ -206,12 +206,12 @@ async def process_joystick(event):
         normalized_value = (event.value - 127) / 128.0
         if INVERT_FORWARD_AXIS:
             normalized_value *= -1
-        value = apply_response_curve(normalized_value, curve_factor=1.0)
+        value = apply_response_curve(normalized_value, curve_factor=2.0)
         desired_forward = value if abs(normalized_value) >= deadzone else 0.0
 
     elif event.code == lhaxis:
         normalized_value = (event.value - 127) / 128.0
-        desired_turn = apply_response_curve(normalized_value, curve_factor=1.0) if abs(normalized_value) >= deadzone else 0.0
+        desired_turn = apply_response_curve(normalized_value, curve_factor=2.0) if abs(normalized_value) >= deadzone else 0.0
 
     elif event.code == rhaxis:
         normalized_value = (event.value - 127) / 128.0
@@ -220,17 +220,19 @@ async def process_joystick(event):
     # DPAD actions, queue Arduino messages safely
     if event.code == ABS_HAT0X:
         if event.value == padLeft:
-            await arduino_queue.put(bytes([2]))
-            await arduino_queue.put(bytes([3]))
+            await arduino_queue.put(bytes([4]))
         elif event.value == padRight:
-            await arduino_queue.put(bytes([1]))
+            await arduino_queue.put(bytes([5]))
             asyncio.create_task(play_sound(screams, "DPAD: RIGHT"))
 
     elif event.code == ABS_HAT0Y:
         if event.value == padUp:
-            asyncio.create_task(play_sound(sents, "DPAD: UP"))
+            await arduino_queue.put(bytes([1]))
+            await arduino_queue.put(bytes([2]))
+            await arduino_queue.put(bytes([3]))
         elif event.value == padDown:
-            asyncio.create_task(play_sound(procs, "DPAD: DOWN"))
+            await arduino_queue.put(bytes([11]))
+
 
 #TODO: Either do more with the MD49 polling or remove it
 async def poll_md49_telemetry(motors, interval=0.5):
@@ -332,7 +334,7 @@ async def arduino_read_loop(arduino_head):
     
     def read_line_blocking():
         try:
-            line = arduino_head.readline().decode("utf-8", errors="ignore").strip()
+            line = arduino_head.readline()
             return line
         except Exception as e:
             logger.error(f"Serial read failed: {e}")
