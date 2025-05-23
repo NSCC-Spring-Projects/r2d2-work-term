@@ -2,8 +2,9 @@
 
 """
 R2D2 Main Control Script - May 2025
-Partial overhaul and refactor of the original code written by previous teams.
-Current iteration and updates written by Jay Harvie & Sloan Corey
+
+May 23, 2025 NOTE: We did not have time time to complete all of our ToDos in this script. It's significantly better than what we received, however
+there is still much room for improvement.
 
 Resources:
 CronTab:https://www.makeuseof.com/how-to-run-a-raspberry-pi-program-script-at-startup/
